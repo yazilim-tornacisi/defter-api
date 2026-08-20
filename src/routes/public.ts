@@ -14,6 +14,15 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     )
     if (!rows.length) return notFound(reply)
     const r = rows[0]
+    pool
+      .query('INSERT INTO share_views (note_id, ip, user_agent) VALUES ($1, $2, $3)', [
+        r.id,
+        req.ip ?? null,
+        (req.headers['user-agent'] as string | undefined) ?? null,
+      ])
+      .catch((err) => {
+        console.error('share view insert failed', err)
+      })
     return {
       id: r.id,
       title: r.title,

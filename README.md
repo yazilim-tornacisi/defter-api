@@ -110,7 +110,9 @@ Varsayılan `DATABASE_URL` (backend): `postgres://postgres:<şifre>@<host>:5432/
 | GET | `/api/admin/settings` | Genel limitler (admin) |
 | PATCH | `/api/admin/settings` | Genel limitleri güncelle (admin) |
 | PATCH | `/api/admin/users/:id/limits` | Kişisel limit override'ı (null = genel varsayılan) |
-| GET | `/api/share/:token` | Herkese açık not (kimlik doğrulamasız) |
+| GET | `/api/admin/users/:id` | Kullanıcı detayı + genel paylaşım istatistikleri (`publicShares`) |
+| GET | `/api/admin/notes/:id/views` | Bir genel paylaşımlı notun son 50 görüntülenme kaydı (admin) |
+| GET | `/api/share/:token` | Herkese açık not (kimlik doğrulamasız); her erişim `share_views` tablosuna kaydedilir |
 
 `/api/notes`, `/api/folders`, `/api/tags`, `/api/admin/*` uçlarının tamamı `Authorization: Bearer <token>` ister.
 
@@ -118,6 +120,6 @@ Varsayılan `DATABASE_URL` (backend): `postgres://postgres:<şifre>@<host>:5432/
 
 Migration'lar backend başlangıcında otomatik çalışır (idempotent). Şema `src/migrations/*.sql` içindedir:
 
-- `folders`, `tags`, `notes`, `note_tags` (çoktan çoğa), `users`, `friendships`, `note_shares`, `auth_logs`
+- `folders`, `tags`, `notes`, `note_tags` (çoktan çoğa), `users`, `friendships`, `note_shares`, `auth_logs`, `share_views`
 - `notes.updated_at` indeksi — son düzenlenen sıralaması için
 - Notların klasörü silinince `folder_id` `NULL` olur, notlar korunur

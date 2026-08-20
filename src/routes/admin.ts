@@ -39,6 +39,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const { rows } = await pool.query(
       `SELECT n.id, n.title, n.content, n.is_pinned, n.created_at, n.updated_at, n.share_token,
         u.id AS user_id, u.username, u.banned_at,
+        (SELECT count(*)::int FROM share_views sv WHERE sv.note_id = n.id) AS view_count,
         COALESCE(
           json_agg(json_build_object('username', su.username, 'permission', ns.permission))
             FILTER (WHERE ns.id IS NOT NULL),
@@ -65,6 +66,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       username: r.username,
       userBanned: !!r.banned_at,
       publicShared: r.share_token !== null,
+      viewCount: r.view_count,
       sharedWith: r.shared_with,
     }))
   })
@@ -78,6 +80,10 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const [notesRes, friendsRes] = await Promise.all([
       pool.query(
         `SELECT n.id, n.title, n.content, n.is_pinned, n.created_at, n.updated_at, n.share_token,
+          (SELECT count(*)::int FROM share_views sv WHERE sv.note_id = n.id) AS view_count,
+          (SELECT min(sv.viewed_at) FROM share_views sv WHERE sv.note_id = n.id) AS first_view_at,
+          (SELECT max(sv.viewed_at) FROM share_views sv WHERE sv.note_id = n.id) AS last_view_at,
+          (SELECT count(DISTINCT sv.ip)::int FROM share_views sv WHERE sv.note_id = n.id) AS unique_ip_count,
           COALESCE(
             json_agg(json_build_object('username', su.username, 'permission', ns.permission))
               FILTER (WHERE ns.id IS NOT NULL),
@@ -101,20 +107,53 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       ),
     ])
 
+    const notes = notesRes.rows.map((n) => ({
+      id: n.id,
+      title: n.title,
+      content: n.content,
+      isPinned: n.is_pinned,
+      createdAt: n.created_at,
+      updatedAt: n.updated_at,
+      publicShared: n.share_token !== null,
+      sharedWith: n.shared_with,
+    }))
+    const publicShares = notesRes.rows
+      .filter((n) => n.share_token !== null)
+      .map((n) => ({
+        noteId: n.id,
+        title: n.title,
+        shareToken: n.share_token,
+        viewCount: n.view_count,
+        uniqueIpCount: n.unique_ip_count,
+        firstViewAt: n.first_view_at,
+        lastViewAt: n.last_view_at,
+      }))
+      .sort((a, b) => (b.viewCount ?? 0) - (a.viewCount ?? 0))
+
     return {
       user,
-      notes: notesRes.rows.map((n) => ({
-        id: n.id,
-        title: n.title,
-        content: n.content,
-        isPinned: n.is_pinned,
-        createdAt: n.created_at,
-        updatedAt: n.updated_at,
-        publicShared: n.share_token !== null,
-        sharedWith: n.shared_with,
-      })),
+      notes,
+      publicShares,
       friends: friendsRes.rows.map((f) => ({ userId: f.user_id, username: f.username, since: f.since })),
     }
+  })
+
+  // Bir genel paylaşımlı notun son görüntülenme kayıtları
+  app.get('/notes/:id/views', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { rows } = await pool.query(
+      `SELECT id, viewed_at, ip::text AS ip, user_agent
+       FROM share_views WHERE note_id = $1
+       ORDER BY viewed_at DESC
+       LIMIT 50`,
+      [id],
+    )
+    return rows.map((r) => ({
+      id: r.id,
+      viewedAt: r.viewed_at,
+      ip: r.ip,
+      userAgent: r.user_agent,
+    }))
   })
 
   // Kullanıcıyı engelle
