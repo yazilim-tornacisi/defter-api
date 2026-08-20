@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { pool } from '../db.js'
 import { mapNote, notFound, badRequest, forbidden } from '../utils.js'
 import { requireAuth } from '../auth.js'
+import { getLimits, MAX_TITLE_LENGTH } from '../limits.js'
 
 const LIST_SELECT = `
   n.id, n.title, n.content, n.folder_id, f.name AS folder_name,
@@ -98,9 +99,30 @@ export async function notesRoutes(app: FastifyInstance): Promise<void> {
       tagIds?: string[]
     }
 
+    const titleText = title?.trim() || 'Untitled'
+    const bodyText = content ?? ''
+    const { maxNotes, maxNoteChars } = await getLimits(userId(req))
+    if (titleText.length > MAX_TITLE_LENGTH) {
+      return badRequest(reply, `Başlık en fazla ${MAX_TITLE_LENGTH} karakter olabilir`)
+    }
+    if (bodyText.length > maxNoteChars) {
+      return forbidden(reply, `Not içeriği en fazla ${maxNoteChars.toLocaleString('tr-TR')} karakter olabilir`)
+    }
+
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
+
+      // Kötüye kullanım koruması: kullanıcı başına not sayısı sınırı
+      const { rows: cnt } = await client.query(
+        'SELECT count(*)::int AS c FROM notes WHERE user_id = $1',
+        [userId(req)],
+      )
+      if (cnt[0].c >= maxNotes) {
+        await client.query('ROLLBACK')
+        return forbidden(reply, `Not sınırına ulaştınız (en fazla ${maxNotes.toLocaleString('tr-TR')} not)`)
+      }
+
       let safeFolder = folderId ?? null
       if (safeFolder) {
         const f = await client.query('SELECT 1 FROM folders WHERE id = $1 AND user_id = $2', [
@@ -114,7 +136,7 @@ export async function notesRoutes(app: FastifyInstance): Promise<void> {
          VALUES ($1, $2, $3, $4, $5)
          RETURNING id, title, content, folder_id, is_pinned, created_at, updated_at,
            (SELECT name FROM folders WHERE id = folder_id) AS folder_name`,
-        [title?.trim() || 'Untitled', content ?? '', safeFolder, isPinned ?? false, userId(req)],
+        [titleText, bodyText, safeFolder, isPinned ?? false, userId(req)],
       )
       const note = rows[0]
       if (tagIds && tagIds.length) {
@@ -152,6 +174,17 @@ export async function notesRoutes(app: FastifyInstance): Promise<void> {
     // Yalnızca sahip klasör/sabitleme/etiket değiştirebilir
     if (access !== 'owner' && (body.folderId !== undefined || body.isPinned !== undefined || body.tagIds !== undefined)) {
       return forbidden(reply, 'Only the owner can change folder, pin or tags')
+    }
+
+    // Kötüye kullanım koruması: içerik ve başlık boyutu sınırı
+    if (body.title !== undefined && body.title.trim().length > MAX_TITLE_LENGTH) {
+      return badRequest(reply, `Başlık en fazla ${MAX_TITLE_LENGTH} karakter olabilir`)
+    }
+    if (body.content !== undefined) {
+      const { maxNoteChars } = await getLimits(me)
+      if (body.content.length > maxNoteChars) {
+        return forbidden(reply, `Not içeriği en fazla ${maxNoteChars.toLocaleString('tr-TR')} karakter olabilir`)
+      }
     }
 
     const sets: string[] = []

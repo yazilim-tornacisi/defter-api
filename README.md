@@ -47,6 +47,7 @@ DATABASE_URL=postgres://postgres:<şifre>@<host>:5432/notes
 - **MITM koruması:** giriş/kayıt bilgileri sunucuya AES-GCM (simetrik) ile şifrelenir; AES anahtarı sunucunun RSA-OAEP genel anahtarıyla sarılır. Sunucu `GET /api/auth/public-key` ile genel anahtarı dağıtır.
 - **Giriş logları:** başarılı/başarısız tüm giriş denemeleri IP + zaman + user-agent ile `auth_logs` tablosuna yazılır. Kullanıcı kendi loglarını (`/api/auth/me/logs`), admin tüm logları (`/api/admin/logs`) görür.
 - **Admin yönetimi:** admin kullanıcıları yönetici yapıp düşürebilir, kullanıcıları engelleyebilir, tüm not içeriklerini/paylaşımlarını görür.
+- **Kötüye kullanım limitleri:** kullanıcı başına not sayısı ve not içerik uzunluğu sınırlandırılır (varsayılan: 2000 not / 200.000 karakter). Genel limitler `settings` tablosundadır; admin panelinden değiştirilebilir. Tek bir kullanıcıya özel sınır da tanımlanabilir (kişisel sınır genel değeri ezer). Not başlığı için sabit 500 karakter üst sınırı vardır.
 - Not, klasör ve etiketlerin tamamı kullanıcıya aittir; tüm sorgular `user_id` ile filtrelenir.
 - Korunan uçlara token olmadan istek **401** döner; başka kullanıcının kaydına erişim **404** ile engellenir.
 - **Önemli:** Üretimde `AUTH_SECRET` ortam değişkenini uzun, rastgele bir değere ayarlayın (`.env` içinde `AUTH_SECRET=...`). Ayarlanmazsa varsayılan sabit değer kullanılır — güvenlik açısından değiştirin.
@@ -102,10 +103,13 @@ Varsayılan `DATABASE_URL` (backend): `postgres://postgres:<şifre>@<host>:5432/
 | PATCH/DELETE | `/api/folders/:id` | Klasör yeniden adlandır/sil (notlar korunur) |
 | GET/POST | `/api/tags` | Etiket listele/oluştur |
 | DELETE | `/api/tags/:id` | Etiket sil |
-| GET | `/api/admin/users` | Tüm kullanıcılar (admin) |
+| GET | `/api/admin/users` | Tüm kullanıcılar + kişisel limit override'ları (admin) |
 | GET | `/api/admin/notes` | Tüm notlar + paylaşım bilgileri (admin) |
 | GET | `/api/admin/logs` | Tüm giriş kayıtları (admin) |
 | PATCH | `/api/admin/users/:id/role` | Yönetici yap / düşür |
+| GET | `/api/admin/settings` | Genel limitler (admin) |
+| PATCH | `/api/admin/settings` | Genel limitleri güncelle (admin) |
+| PATCH | `/api/admin/users/:id/limits` | Kişisel limit override'ı (null = genel varsayılan) |
 | GET | `/api/share/:token` | Herkese açık not (kimlik doğrulamasız) |
 
 `/api/notes`, `/api/folders`, `/api/tags`, `/api/admin/*` uçlarının tamamı `Authorization: Bearer <token>` ister.

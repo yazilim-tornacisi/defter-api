@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
 import { pool } from '../db.js'
 import { badRequest, notFound } from '../utils.js'
 import { hashPassword, requireAdmin, requireAuth } from '../auth.js'
+import { getGlobalLimits, LIMIT_BOUNDS, sanitizePositiveInt } from '../limits.js'
 
 export async function adminRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preValidation', requireAuth)
@@ -11,6 +12,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   app.get('/users', async () => {
     const { rows } = await pool.query(
       `SELECT u.id, u.username, u.email, u.is_admin, u.banned_at, u.created_at,
+        u.max_notes, u.max_note_chars,
         (SELECT count(*)::int FROM notes n WHERE n.user_id = u.id) AS note_count,
         (SELECT count(*)::int FROM friendships f
           WHERE f.status = 'accepted' AND (f.requester_id = u.id OR f.addressee_id = u.id)) AS friend_count
@@ -26,6 +28,8 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       createdAt: r.created_at,
       noteCount: r.note_count,
       friendCount: r.friend_count,
+      maxNotes: r.max_notes,
+      maxNoteChars: r.max_note_chars,
     }))
   })
 
@@ -230,11 +234,90 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     if (!rows.length) return notFound(reply, 'Note not found')
     return reply.code(204).send()
   })
+
+  // Genel (varsayılan) kullanıcı limitlerini getir
+  app.get('/settings', async () => {
+    return getGlobalLimits()
+  })
+
+  // Genel limitleri güncelle (tüm kullanıcıları etkiler; kişisel override'lar önceliklidir)
+  app.patch('/settings', async (req, reply) => {
+    const body = req.body as { maxNotesPerUser?: unknown; maxNoteContentLength?: unknown }
+    const updates: [string, number][] = []
+    if (body.maxNotesPerUser !== undefined) {
+      const n = sanitizePositiveInt(body.maxNotesPerUser, LIMIT_BOUNDS.maxNotes.min, LIMIT_BOUNDS.maxNotes.max)
+      if (n === null) return badRequest(reply, 'Geçersiz not sayısı limiti')
+      updates.push(['max_notes_per_user', n])
+    }
+    if (body.maxNoteContentLength !== undefined) {
+      const n = sanitizePositiveInt(body.maxNoteContentLength, LIMIT_BOUNDS.maxNoteChars.min, LIMIT_BOUNDS.maxNoteChars.max)
+      if (n === null) return badRequest(reply, 'Geçersiz içerik uzunluğu limiti')
+      updates.push(['max_note_content_length', n])
+    }
+    if (!updates.length) return badRequest(reply, 'Güncellenecek limit yok')
+
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      for (const [key, value] of updates) {
+        await client.query(
+          `INSERT INTO settings (key, value) VALUES ($1, $2)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+          [key, String(value)],
+        )
+      }
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+    return getGlobalLimits()
+  })
+
+  // Tek kullanıcının kişisel limit override'larını ayarla (null = genel varsayılanı kullan)
+  app.patch('/users/:id/limits', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const body = req.body as { maxNotes?: unknown; maxNoteChars?: unknown }
+    const sets: string[] = []
+    const params: unknown[] = []
+    const p = (v: unknown) => {
+      params.push(v)
+      return `$${params.length}`
+    }
+
+    if (body.maxNotes !== undefined) {
+      if (body.maxNotes === null) sets.push('max_notes = NULL')
+      else {
+        const n = sanitizePositiveInt(body.maxNotes, LIMIT_BOUNDS.maxNotes.min, LIMIT_BOUNDS.maxNotes.max)
+        if (n === null) return badRequest(reply, 'Geçersiz not sayısı limiti')
+        sets.push(`max_notes = ${p(n)}`)
+      }
+    }
+    if (body.maxNoteChars !== undefined) {
+      if (body.maxNoteChars === null) sets.push('max_note_chars = NULL')
+      else {
+        const n = sanitizePositiveInt(body.maxNoteChars, LIMIT_BOUNDS.maxNoteChars.min, LIMIT_BOUNDS.maxNoteChars.max)
+        if (n === null) return badRequest(reply, 'Geçersiz içerik uzunluğu limiti')
+        sets.push(`max_note_chars = ${p(n)}`)
+      }
+    }
+    if (!sets.length) return badRequest(reply, 'Güncellenecek limit yok')
+
+    const { rows } = await pool.query(
+      `UPDATE users SET ${sets.join(', ')} WHERE id = ${p(id)} RETURNING max_notes, max_note_chars`,
+      params,
+    )
+    if (!rows.length) return notFound(reply, 'User not found')
+    return { maxNotes: rows[0].max_notes, maxNoteChars: rows[0].max_note_chars }
+  })
 }
 
 async function getUser(reply: FastifyReply, id: string) {
   const { rows } = await pool.query(
     `SELECT u.id, u.username, u.email, u.is_admin, u.banned_at, u.created_at,
+      u.max_notes, u.max_note_chars,
       (SELECT count(*)::int FROM notes n WHERE n.user_id = u.id) AS note_count,
       (SELECT count(*)::int FROM friendships f
         WHERE f.status = 'accepted' AND (f.requester_id = u.id OR f.addressee_id = u.id)) AS friend_count
@@ -255,5 +338,7 @@ async function getUser(reply: FastifyReply, id: string) {
     createdAt: r.created_at,
     noteCount: r.note_count,
     friendCount: r.friend_count,
+    maxNotes: r.max_notes,
+    maxNoteChars: r.max_note_chars,
   }
 }
