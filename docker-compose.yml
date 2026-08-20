@@ -1,0 +1,15 @@
+name: defter-api
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://postgres:change-me@localhost:5432/notes}
+      PORT: 4000
+      HOST: 0.0.0.0
+      AUTH_SECRET: ${AUTH_SECRET:-change-me-to-a-long-random-string}
+    ports:
+      - "${API_PORT:-29868}:4000"
