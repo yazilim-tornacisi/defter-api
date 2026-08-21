@@ -9,7 +9,7 @@ const OAEP_OPTIONS = { key: PRIVATE_KEY_PEM, padding: constants.RSA_PKCS1_OAEP_P
 declare module 'fastify' {
   interface FastifyRequest {
     userId?: string
-    user?: { id: string; email: string; username: string; is_admin: boolean; banned_at: string | null }
+    user?: { id: string; email: string; username: string; is_admin: boolean; is_developer: boolean; banned_at: string | null }
   }
 }
 
@@ -67,8 +67,8 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply): Pro
   const uid = token ? verifyToken(token) : null
   if (!uid) return unauthorized(reply)
 
-  const { rows } = await pool.query<{ id: string; email: string; username: string; is_admin: boolean; banned_at: string | null }>(
-    'SELECT id, email, username, is_admin, banned_at FROM users WHERE id = $1',
+  const { rows } = await pool.query<{ id: string; email: string; username: string; is_admin: boolean; is_developer: boolean; banned_at: string | null }>(
+    'SELECT id, email, username, is_admin, is_developer, banned_at FROM users WHERE id = $1',
     [uid],
   )
   const user = rows[0]
@@ -85,13 +85,18 @@ export async function requireAdmin(req: FastifyRequest, reply: FastifyReply): Pr
   return undefined
 }
 
+export async function requireDev(req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply | undefined> {
+  if (!req.user?.is_developer) return forbidden(reply, 'Yalnızca geliştirici')
+  return undefined
+}
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/
 
-type UserRow = { id: string; email: string; username: string; password: string; is_admin: boolean; banned_at: string | null }
+type UserRow = { id: string; email: string; username: string; password: string; is_admin: boolean; is_developer: boolean; banned_at: string | null }
 
-function toPublicUser(row: { id: string; email: string; username: string; is_admin: boolean }) {
-  return { id: row.id, email: row.email, username: row.username, isAdmin: row.is_admin }
+function toPublicUser(row: { id: string; email: string; username: string; is_admin: boolean; is_developer?: boolean }) {
+  return { id: row.id, email: row.email, username: row.username, isAdmin: row.is_admin, isDeveloper: row.is_developer === true }
 }
 
 type EncPayload = { wrappedKey?: string; iv?: string; data?: string }
@@ -163,7 +168,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     if (exists.rowCount) return badRequest(reply, 'Email or username already in use')
 
     const { rows } = await pool.query<UserRow>(
-      'INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id, email, username, is_admin',
+      'INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id, email, username, is_admin, is_developer',
       [cleanUsername, cleanEmail, hashPassword(password)],
     )
     const user = rows[0]
@@ -184,7 +189,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const { rows } = await pool.query<UserRow>(
-      'SELECT id, email, username, password, is_admin, banned_at FROM users WHERE email = $1 OR lower(username) = $1',
+      'SELECT id, email, username, password, is_admin, is_developer, banned_at FROM users WHERE email = $1 OR lower(username) = $1',
       [identifier],
     )
     const user = rows[0]
@@ -201,7 +206,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   })
 
   app.get('/me', { preValidation: requireAuth }, async (req, reply) => {
-    const { rows } = await pool.query<UserRow>('SELECT id, email, username, is_admin FROM users WHERE id = $1', [req.userId])
+    const { rows } = await pool.query<UserRow>('SELECT id, email, username, is_admin, is_developer FROM users WHERE id = $1', [req.userId])
     if (!rows.length) return unauthorized(reply)
     return { user: toPublicUser(rows[0]) }
   })

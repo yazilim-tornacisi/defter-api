@@ -11,7 +11,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   // Tüm kullanıcılar: not ve arkadaş sayıları ile birlikte
   app.get('/users', async () => {
     const { rows } = await pool.query(
-      `SELECT u.id, u.username, u.email, u.is_admin, u.banned_at, u.created_at,
+      `SELECT u.id, u.username, u.email, u.is_admin, u.is_developer, u.banned_at, u.created_at,
         u.max_notes, u.max_note_chars,
         (SELECT count(*)::int FROM notes n WHERE n.user_id = u.id) AS note_count,
         (SELECT count(*)::int FROM friendships f
@@ -24,6 +24,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       username: r.username,
       email: r.email,
       isAdmin: r.is_admin,
+      isDeveloper: r.is_developer,
       bannedAt: r.banned_at,
       createdAt: r.created_at,
       noteCount: r.note_count,
@@ -223,6 +224,22 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     return { isAdmin }
   })
 
+  // Kullanıcıya developer rolü ver / kaldır
+  app.patch('/users/:id/dev-role', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { isDeveloper } = req.body as { isDeveloper?: boolean }
+    const me = req.userId as string
+    if (typeof isDeveloper !== 'boolean') return badRequest(reply, 'isDeveloper is required')
+    if (id === me) return badRequest(reply, 'Kendi rolünüzü değiştiremezsiniz')
+
+    const { rows } = await pool.query('SELECT banned_at FROM users WHERE id = $1', [id])
+    if (!rows.length) return notFound(reply, 'User not found')
+    if (isDeveloper && rows[0].banned_at) return badRequest(reply, 'Engelli kullanıcı developer yapılamaz')
+
+    await pool.query('UPDATE users SET is_developer = $1 WHERE id = $2', [isDeveloper, id])
+    return { isDeveloper }
+  })
+
   // Tüm giriş kayıtları (filtre + sayfalama)
   app.get('/logs', async (req) => {
     const query = req.query as { q?: string; success?: string; limit?: string; offset?: string }
@@ -355,7 +372,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
 
 async function getUser(reply: FastifyReply, id: string) {
   const { rows } = await pool.query(
-    `SELECT u.id, u.username, u.email, u.is_admin, u.banned_at, u.created_at,
+    `SELECT u.id, u.username, u.email, u.is_admin, u.is_developer, u.banned_at, u.created_at,
       u.max_notes, u.max_note_chars,
       (SELECT count(*)::int FROM notes n WHERE n.user_id = u.id) AS note_count,
       (SELECT count(*)::int FROM friendships f
@@ -373,6 +390,7 @@ async function getUser(reply: FastifyReply, id: string) {
     username: r.username,
     email: r.email,
     isAdmin: r.is_admin,
+    isDeveloper: r.is_developer,
     bannedAt: r.banned_at,
     createdAt: r.created_at,
     noteCount: r.note_count,
