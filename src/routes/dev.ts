@@ -5,16 +5,16 @@ import { requireAuth, requireDev } from '../auth.js'
 const DAY_SERIES_DAYS = 30
 
 // Günlük seri: boş günleri de 0 olarak üretir (grafik için kesintisiz dizi)
-async function dailySeries(sql: string, params: unknown[]): Promise<{ day: string; count: number }[]> {
+async function dailySeries(sql: string, params: unknown[]): Promise<{ day: string; views: number }[]> {
   const { rows } = await pool.query<{ day: string; count: number }>(sql, params)
   const map = new Map(rows.map((r) => [String(r.day).slice(0, 10), Number(r.count)]))
-  const out: { day: string; count: number }[] = []
+  const out: { day: string; views: number }[] = []
   const today = new Date()
   for (let i = DAY_SERIES_DAYS - 1; i >= 0; i--) {
     const d = new Date(today)
     d.setDate(today.getDate() - i)
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-    out.push({ day: key, count: map.get(key) ?? 0 })
+    out.push({ day: key, views: map.get(key) ?? 0 })
   }
   return out
 }
