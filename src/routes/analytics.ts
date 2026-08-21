@@ -38,7 +38,7 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
         [userId],
       ),
       pool.query(
-        `SELECT (date_trunc('day', sv.viewed_at))::date AS day, count(*)::int AS views
+        `SELECT to_char(sv.viewed_at, 'YYYY-MM-DD') AS day, count(*)::int AS views
          FROM share_views sv
          JOIN notes n ON n.id = sv.note_id
          WHERE n.user_id = $1 AND n.share_token IS NOT NULL
@@ -64,6 +64,7 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
       notes: notesRes.rows.map((r) => ({
         noteId: r.id,
         title: r.title,
+        shareToken: r.share_token,
         viewCount: r.view_count,
         uniqueIpCount: r.unique_ip_count,
         firstViewAt: r.first_view_at,
@@ -85,7 +86,7 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
     if (!rows.length) return notFound(reply, 'Paylaşımlı not bulunamadı')
 
     const daily = await pool.query(
-      `SELECT (date_trunc('day', viewed_at))::date AS day, count(*)::int AS views
+      `SELECT to_char(viewed_at, 'YYYY-MM-DD') AS day, count(*)::int AS views
        FROM share_views
        WHERE note_id = $1 AND viewed_at >= now() - ($2::int * interval '1 day')
        GROUP BY day
