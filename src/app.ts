@@ -7,6 +7,7 @@ import { authRoutes } from './auth.js'
 import { friendsRoutes } from './routes/friends.js'
 import { adminRoutes } from './routes/admin.js'
 import { publicRoutes } from './routes/public.js'
+import { analyticsRoutes } from './routes/analytics.js'
 
 export function buildApp() {
   const app = Fastify({ logger: true, trustProxy: true })
@@ -20,6 +21,7 @@ export function buildApp() {
   app.register(adminRoutes, { prefix: '/api/admin' })
   app.register(notesRoutes, { prefix: '/api/notes' })
   app.register(publicRoutes, { prefix: '/api' })
+  app.register(analyticsRoutes, { prefix: '/api' })
   app.register(foldersRoutes, { prefix: '/api/folders' })
   app.register(tagsRoutes, { prefix: '/api/tags' })
 
