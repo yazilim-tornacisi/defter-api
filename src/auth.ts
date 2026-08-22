@@ -112,6 +112,35 @@ export async function requireDev(req: FastifyRequest, reply: FastifyReply): Prom
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/
 
+// ----- Cloudflare Turnstile -----
+const TURNSTILE_SECRET = process.env.TURNSTILE_SECRET?.trim()
+let turnstileWarned = false
+async function verifyTurnstile(token: string | undefined, remoteIp: string | null): Promise<boolean> {
+  if (!TURNSTILE_SECRET) {
+    if (!turnstileWarned) {
+      console.warn('[turnstile] TURNSTILE_SECRET not set — captcha skipped (dev mode)')
+      turnstileWarned = true
+    }
+    return true
+  }
+  if (!token || typeof token !== 'string' || token.length < 10 || token.length > 4096) return false
+  try {
+    const body = new URLSearchParams({ secret: TURNSTILE_SECRET, response: token })
+    if (remoteIp) body.set('remoteip', remoteIp)
+    const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    })
+    const data = (await res.json()) as { success?: boolean; 'error-codes'?: string[] }
+    if (!data.success) console.warn('[turnstile] verify failed', data['error-codes'])
+    return data.success === true
+  } catch (err) {
+    console.error('[turnstile] verify error', err)
+    return false
+  }
+}
+
 type UserRow = { id: string; email: string; username: string; password: string; is_admin: boolean; is_developer: boolean; banned_at: string | null }
 
 function toPublicUser(row: { id: string; email: string; username: string; is_admin: boolean; is_developer?: boolean }) {
@@ -254,7 +283,16 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/register', async (req, reply) => {
     const body = decryptPayload(req.body as Record<string, unknown>)
-    const { username, email, password } = body as { username?: string; email?: string; password?: string }
+    const { username, email, password, captchaToken } = body as {
+      username?: string
+      email?: string
+      password?: string
+      captchaToken?: string
+    }
+    const { ip } = reqMeta(req)
+    if (!(await verifyTurnstile(captchaToken, ip))) {
+      return badRequest(reply, 'Captcha doğrulaması başarısız — lütfen tekrar deneyin')
+    }
     const cleanEmail = email?.trim().toLowerCase()
     const cleanUsername = username?.trim()
     if (!cleanUsername || !USERNAME_RE.test(cleanUsername)) {
@@ -274,19 +312,22 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       [cleanUsername, cleanEmail, hashPassword(password)],
     )
     const user = rows[0]
-    const { ip, ua } = reqMeta(req)
+    const { ua } = reqMeta(req)
     void logLogin({ userId: user.id, identifier: cleanEmail, success: true, ip, userAgent: ua })
     return reply.code(201).send({ token: signToken(user.id), user: toPublicUser(user) })
   })
 
   app.post('/login', async (req, reply) => {
     const body = decryptPayload(req.body as Record<string, unknown>)
-    const { email, password } = body as { email?: string; password?: string }
+    const { email, password, captchaToken } = body as { email?: string; password?: string; captchaToken?: string }
     const identifier = email?.trim().toLowerCase()
-    const { ip, ua } = reqMeta(req)
+    const { ip: loginIp, ua: loginUa } = reqMeta(req)
+    if (!(await verifyTurnstile(captchaToken, loginIp))) {
+      return badRequest(reply, 'Captcha doğrulaması başarısız — lütfen tekrar deneyin')
+    }
 
     if (!identifier || !password) {
-      if (identifier) void logLogin({ userId: null, identifier, success: false, ip, userAgent: ua })
+      if (identifier) void logLogin({ userId: null, identifier, success: false, ip: loginIp, userAgent: loginUa })
       return badRequest(reply, 'Email or username and password are required')
     }
 
@@ -296,14 +337,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     )
     const user = rows[0]
     if (!user || !verifyPassword(password, user.password)) {
-      void logLogin({ userId: user?.id ?? null, identifier, success: false, ip, userAgent: ua })
+      void logLogin({ userId: user?.id ?? null, identifier, success: false, ip: loginIp, userAgent: loginUa })
       return unauthorized(reply, 'Invalid email/username or password')
     }
     if (user.banned_at) {
-      void logLogin({ userId: user.id, identifier, success: false, ip, userAgent: ua })
+      void logLogin({ userId: user.id, identifier, success: false, ip: loginIp, userAgent: loginUa })
       return reply.code(403).send({ error: 'Hesabınız engellendi' })
     }
-    void logLogin({ userId: user.id, identifier, success: true, ip, userAgent: ua })
+    void logLogin({ userId: user.id, identifier, success: true, ip: loginIp, userAgent: loginUa })
     return { token: signToken(user.id), user: toPublicUser(user) }
   })
 

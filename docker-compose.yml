@@ -15,5 +15,6 @@ services:
       REDIS_PORT: ${REDIS_PORT:-}
       REDIS_PASS: ${REDIS_PASS:-}
       REDIS_URL: ${REDIS_URL:-}
+      TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
     ports:
       - "${API_PORT:-29868}:4000"
