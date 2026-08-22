@@ -11,5 +11,9 @@ services:
       PORT: 4000
       HOST: 0.0.0.0
       AUTH_SECRET: ${AUTH_SECRET:-change-me-to-a-long-random-string}
+      REDIS_HOST: ${REDIS_HOST:-}
+      REDIS_PORT: ${REDIS_PORT:-}
+      REDIS_PASS: ${REDIS_PASS:-}
+      REDIS_URL: ${REDIS_URL:-}
     ports:
       - "${API_PORT:-29868}:4000"

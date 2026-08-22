@@ -10,6 +10,7 @@ import { publicRoutes } from './routes/public.js'
 import { analyticsRoutes } from './routes/analytics.js'
 import { devRoutes } from './routes/dev.js'
 import { attachMetrics } from './metrics.js'
+import { attachRateLimit } from './rateLimit.js'
 
 export function buildApp() {
   const app = Fastify({ logger: true, trustProxy: true })
@@ -17,6 +18,7 @@ export function buildApp() {
   app.register(cors, { origin: true })
 
   app.get('/api/health', async () => ({ ok: true }))
+  attachRateLimit(app)
   attachMetrics(app)
 
   app.register(authRoutes, { prefix: '/api/auth' })
