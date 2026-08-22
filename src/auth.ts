@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
-import { constants, createCipheriv, createDecipheriv, createHmac, privateDecrypt, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
+import { constants, createCipheriv, createDecipheriv, createHash, createHmac, privateDecrypt, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import { pool } from './db.js'
-import { badRequest, forbidden, unauthorized } from './utils.js'
+import { badRequest, forbidden, notFound, unauthorized } from './utils.js'
 import { PRIVATE_KEY_PEM, PUBLIC_KEY_PEM } from './crypto-keys.js'
 
 const OAEP_OPTIONS = { key: PRIVATE_KEY_PEM, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }
@@ -15,6 +15,25 @@ declare module 'fastify' {
 
 const SECRET = process.env.AUTH_SECRET ?? 'dev-secret-change-me'
 const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 gün
+
+// ----- QR login helpers -----
+const PAIR_TTL_MS = 3 * 60 * 1000 // 3 dakika
+function hashPairCode(code: string): string {
+  return createHash('sha256').update(code).digest('hex')
+}
+const pairRateMap = new Map<string, number[]>()
+function pairAllowIp(ip: string | undefined, limit = 20, windowMs = 60_000): boolean {
+  if (!ip) return true
+  const now = Date.now()
+  const arr = (pairRateMap.get(ip) ?? []).filter((t) => now - t < windowMs)
+  if (arr.length >= limit) {
+    pairRateMap.set(ip, arr)
+    return false
+  }
+  arr.push(now)
+  pairRateMap.set(ip, arr)
+  return true
+}
 
 export function hashPassword(pw: string): string {
   const salt = randomBytes(16).toString('hex')
@@ -149,6 +168,89 @@ function reqMeta(req: FastifyRequest): { ip: string | null; ua: string | null } 
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.get('/public-key', async () => ({ publicKey: PUBLIC_KEY_PEM }))
+
+  // ----- QR kod ile giriş -----
+  // Desktop login ekranı QR üretir (kimlik doğrulamasız); mobil uygulama tarayıp onaylar
+  app.post('/pair/start', async (req, reply) => {
+    if (!pairAllowIp(req.ip, 10, 60_000)) return reply.code(429).send({ error: 'Çok fazla deneme' })
+    const code = randomBytes(32).toString('base64url')
+    const expiresAt = new Date(Date.now() + PAIR_TTL_MS)
+    // Eski/süresi dolmuş kayıtları temizle (en fazla 50 tanesi, hafif)
+    pool.query('DELETE FROM pair_logins WHERE expires_at < now() - interval \'10 minutes\'').catch(() => {})
+    await pool.query(
+      'INSERT INTO pair_logins (code_hash, expires_at, device_ua, ip) VALUES ($1, $2, $3, $4)',
+      [hashPairCode(code), expiresAt, (req.headers['user-agent'] as string | undefined) ?? null, req.ip ?? null],
+    )
+    return { code, expiresIn: Math.round(PAIR_TTL_MS / 1000) }
+  })
+
+  // QR'ı oluşturan cihaz bu endpoint'i poll eder (kimlik doğrulamasız)
+  app.get('/pair/wait', async (req, reply) => {
+    if (!pairAllowIp(req.ip, 30, 60_000)) return reply.code(429).send({ error: 'Çok fazla deneme' })
+    const { code } = req.query as { code?: string }
+    if (!code || code.length > 200) return badRequest(reply, 'code gerekli')
+    const h = hashPairCode(code)
+    const { rows } = await pool.query<{ status: string; approved_by: string | null; expires_at: string }>(
+      'SELECT status, approved_by, expires_at FROM pair_logins WHERE code_hash = $1',
+      [h],
+    )
+    if (!rows.length) return notFound(reply, 'Kod geçersiz')
+    const row = rows[0]
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      return reply.code(410).send({ error: 'Kodun süresi doldu' })
+    }
+    if (row.status === 'pending') return { status: 'pending' as const }
+    if (row.status === 'approved' && row.approved_by) {
+      // Tek seferlik teslim: atomik olarak completed yap
+      const upd = await pool.query<{ approved_by: string }>(
+        "UPDATE pair_logins SET status = 'completed' WHERE code_hash = $1 AND status = 'approved' RETURNING approved_by",
+        [h],
+      )
+      if (!upd.rows.length) return { status: 'pending' as const }
+      const uid = upd.rows[0].approved_by
+      void logLogin({ userId: uid, identifier: 'qr-pair', success: true, ip: req.ip ?? null, userAgent: (req.headers['user-agent'] as string | undefined) ?? null })
+      const u = await pool.query<UserRow>('SELECT id, email, username, is_admin, is_developer FROM users WHERE id = $1', [uid])
+      if (!u.rows.length) return notFound(reply, 'User not found')
+      return { status: 'approved' as const, token: signToken(uid), user: toPublicUser(u.rows[0]) }
+    }
+    if (row.status === 'completed') return reply.code(410).send({ error: 'Kod zaten kullanıldı' })
+    return { status: row.status }
+  })
+
+  // Mobil cihaz QR'ı taradığında — onay ekranında neyi onaylayacağını gösterir
+  app.get('/pair/info', { preValidation: requireAuth }, async (req, reply) => {
+    if (!pairAllowIp(req.ip, 30, 60_000)) return reply.code(429).send({ error: 'Çok fazla deneme' })
+    const { code } = req.query as { code?: string }
+    if (!code || code.length > 200) return badRequest(reply, 'code gerekli')
+    const h = hashPairCode(code)
+    const { rows } = await pool.query<{ status: string; expires_at: string; device_ua: string | null; created_at: string }>(
+      'SELECT status, expires_at, device_ua, created_at FROM pair_logins WHERE code_hash = $1',
+      [h],
+    )
+    if (!rows.length) return notFound(reply, 'Kod geçersiz')
+    const row = rows[0]
+    if (new Date(row.expires_at).getTime() < Date.now()) return reply.code(410).send({ error: 'Kodun süresi doldu' })
+    if (row.status !== 'pending') return badRequest(reply, row.status === 'approved' ? 'Kod zaten onaylandı' : 'Kod zaten kullanıldı')
+    return { status: 'pending' as const, createdAt: row.created_at, expiresAt: row.expires_at, deviceUa: row.device_ua }
+  })
+
+  app.post('/pair/approve', { preValidation: requireAuth }, async (req, reply) => {
+    if (!pairAllowIp(req.ip, 20, 60_000)) return reply.code(429).send({ error: 'Çok fazla deneme' })
+    const { code } = req.body as { code?: string }
+    if (!code || code.length > 200) return badRequest(reply, 'code gerekli')
+    const h = hashPairCode(code)
+    const { rows } = await pool.query<{ id: string }>(
+      "UPDATE pair_logins SET status = 'approved', approved_by = $2, approved_at = now() WHERE code_hash = $1 AND status = 'pending' AND expires_at > now() RETURNING id",
+      [h, req.userId],
+    )
+    if (!rows.length) {
+      const { rows: cur } = await pool.query<{ status: string; expires_at: string }>('SELECT status, expires_at FROM pair_logins WHERE code_hash = $1', [h])
+      if (!cur.length) return notFound(reply, 'Kod geçersiz')
+      if (new Date(cur[0].expires_at).getTime() < Date.now()) return reply.code(410).send({ error: 'Kodun süresi doldu' })
+      return badRequest(reply, cur[0].status === 'approved' ? 'Kod zaten onaylandı' : 'Kod kullanılamaz durumda')
+    }
+    return { approved: true }
+  })
 
   app.post('/register', async (req, reply) => {
     const body = decryptPayload(req.body as Record<string, unknown>)
